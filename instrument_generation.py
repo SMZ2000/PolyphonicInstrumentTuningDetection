@@ -6,14 +6,15 @@ import pandas as pd
 import soundfile as sf
 import deeplake
 from tqdm import tqdm
-from huggingface_hub import create_repo, upload_folder
 from multiprocessing import Pool, cpu_count
+import time
+import zipfile
 
 #CONFIG
 OUTPUT_DIR = "out_of_tune_instruments"
 AUDIO_DIR = os.path.join(OUTPUT_DIR, "audio")
 LABEL_CHUNK_PATH = os.path.join(OUTPUT_DIR, "labels_chunks")
-REPO_ID = "mmthen/mixed_out_of_tune_instruments"  # 👈 CHANGE THIS
+ZIP_OUTPUT = os.path.join(OUTPUT_DIR, "audio_dataset.zip")
 
 SAMPLE_RATE = 16000
 DURATION_SEC = 4
@@ -58,7 +59,16 @@ def generate_sample(i):
     instruments_all = []
 
     for idx, (sample_idx, inst_id) in enumerate(chosen):
-        sample = ds[sample_idx]
+        for attempt in range(3):
+            try:
+                sample = ds[sample_idx]
+                break
+            except Exception as e:
+                print(f"Retrying sample {sample_idx} (attempt {attempt + 1}): {e}")
+                time.sleep(5 * (attempt + 1))
+        else:
+            raise RuntimeError(f"Failed to load sample {sample_idx} after retries.")
+
         y = np.array(sample['audios'], dtype=np.float32).flatten()
         y = librosa.util.fix_length(y, size=int(SAMPLE_RATE * DURATION_SEC))
 
@@ -99,6 +109,18 @@ def run_batch(start_idx, end_idx, chunk_id):
 
     pd.DataFrame(results).to_csv(os.path.join(LABEL_CHUNK_PATH, f"labels_chunk_{chunk_id}.csv"), index=False)
 
+# Create ZIP of audio folder
+def zip_audio_folder(audio_dir, output_zip):
+    print(f"Zipping audio folder into: {output_zip}")
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(audio_dir):
+            for file in files:
+                if file.endswith('.wav'):
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, start=audio_dir)
+                    zipf.write(file_path, arcname=arcname)
+    print("ZIP file created.")
+
 #MAIN
 if __name__ == "__main__":
     import multiprocessing as mp
@@ -117,14 +139,7 @@ if __name__ == "__main__":
     full_df = pd.concat(all_chunks, ignore_index=True)
     full_df.to_csv(os.path.join(OUTPUT_DIR, "labels.csv"), index=False)
 
-    #Upload to Hugging Face
-    print("Uploading to Hugging Face")
-    create_repo(REPO_ID, repo_type="dataset", exist_ok=True)
-    upload_folder(
-        folder_path=OUTPUT_DIR,
-        path_in_repo="",
-        repo_id=REPO_ID,
-        repo_type="dataset"
-    )
+    #Zip audio directory
+    zip_audio_folder(AUDIO_DIR, ZIP_OUTPUT)
 
-    print("Dataset uploaded to:", REPO_ID)
+    print("Dataset generation and zipping complete.")
